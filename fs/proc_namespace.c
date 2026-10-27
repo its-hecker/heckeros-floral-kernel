@@ -22,7 +22,6 @@
 #include "internal.h"
 
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-extern struct static_key_false susfs_is_hide_sus_mnts_for_non_su_procs_enabled;
 extern bool susfs_is_current_ksu_domain(void);
 #endif
 
@@ -127,7 +126,7 @@ static int show_vfsmnt(struct seq_file *m, struct vfsmount *mnt)
 	int err;
 
 	#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-	if (unlikely(!susfs_is_current_ksu_domain() && susfs_is_redundant_vold_obb(r)))
+	if (unlikely(susfs_is_current_proc_umounted_app() && susfs_is_redundant_vold_obb(r)))
 		return 0;
 #endif
 	if (sb->s_op->show_devname) {
@@ -167,7 +166,7 @@ static int show_mountinfo(struct seq_file *m, struct vfsmount *mnt)
 	int err;
 
 	#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-	if (unlikely(!susfs_is_current_ksu_domain() && susfs_is_redundant_vold_obb(r)))
+	if (unlikely(susfs_is_current_proc_umounted_app() && susfs_is_redundant_vold_obb(r)))
 		return 0;
 #endif
 	seq_printf(m, "%i %i %u:%u ", r->mnt_id, r->mnt_parent->mnt_id,
@@ -499,10 +498,8 @@ static int mounts_release(struct inode *inode, struct file *file)
 static int mounts_open(struct inode *inode, struct file *file)
 {
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-	if (static_branch_unlikely(&susfs_is_hide_sus_mnts_for_non_su_procs_enabled)) {
-		if (likely(!susfs_is_current_ksu_domain()))
-			return mounts_open_common(inode, file, susfs_show_vfsmnt);
-	}
+	if (susfs_is_current_proc_umounted_app())
+		return mounts_open_common(inode, file, susfs_show_vfsmnt);
 #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 	return mounts_open_common(inode, file, show_vfsmnt);
 }
@@ -510,10 +507,8 @@ static int mounts_open(struct inode *inode, struct file *file)
 static int mountinfo_open(struct inode *inode, struct file *file)
 {
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-	if (static_branch_unlikely(&susfs_is_hide_sus_mnts_for_non_su_procs_enabled)) {
-		if (likely(!susfs_is_current_ksu_domain()))
-			return mounts_open_common(inode, file, susfs_show_mountinfo);
-	}
+	if (susfs_is_current_proc_umounted_app())
+		return mounts_open_common(inode, file, susfs_show_mountinfo);
 #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 	return mounts_open_common(inode, file, show_mountinfo);
 }
@@ -521,10 +516,8 @@ static int mountinfo_open(struct inode *inode, struct file *file)
 static int mountstats_open(struct inode *inode, struct file *file)
 {
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-	if (static_branch_unlikely(&susfs_is_hide_sus_mnts_for_non_su_procs_enabled)) {
-		if (likely(!susfs_is_current_ksu_domain()))
-			return mounts_open_common(inode, file, susfs_show_vfsstat);
-	}
+	if (susfs_is_current_proc_umounted_app())
+		return mounts_open_common(inode, file, susfs_show_vfsstat);
 #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 	return mounts_open_common(inode, file, show_vfsstat);
 }
