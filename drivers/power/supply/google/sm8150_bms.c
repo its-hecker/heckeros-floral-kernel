@@ -25,6 +25,9 @@
 #include <linux/power_supply.h>
 #include <linux/regmap.h>
 #include <linux/bitops.h>
+#include <linux/mutex.h>
+#include <linux/workqueue.h>
+#include <linux/jiffies.h>
 #include "google_bms.h"
 /* hackaroo... */
 #include <linux/qpnp/qpnp-revid.h>
@@ -43,6 +46,11 @@ struct bms_dev {
 	bool				fcc_stepper_enable;
 	u32				rradc_base;
 	int				chg_term_voltage;
+	struct mutex game_charge_lock;
+	struct delayed_work game_charge_timeout;
+	unsigned long game_charge_deadline;
+	bool normal_charge_disabled;
+	bool game_charge_disabled;
 
 };
 
@@ -884,20 +892,97 @@ static int sm8150_psy_get_property(struct power_supply *psy,
 	return 0;
 }
 
+/* Independent inhibitor: health/thermal decisions always win over Game Booster.
+ * Neither USB input suspend nor the charging current/voltage limits are changed.
+ */
+static int sm8150_apply_charge_disable(struct bms_dev *bms)
+{
+	bool disable = bms->normal_charge_disabled || bms->game_charge_disabled;
+	u8 val = disable ? 0 : CHARGING_ENABLE_CMD_BIT;
+
+	return sm8150_masked_write(bms->pmic_regmap, CHGR_CHARGING_ENABLE_CMD,
+				  CHARGING_ENABLE_CMD_BIT, val);
+}
+
 static int sm8150_charge_disable(struct bms_dev *bms, bool disable)
 {
-	const u8 val = disable ? 0 : CHARGING_ENABLE_CMD_BIT;
 	int rc;
 
-	rc = sm8150_masked_write(bms->pmic_regmap,
-				 CHGR_CHARGING_ENABLE_CMD,
-				 CHARGING_ENABLE_CMD_BIT, val);
-
-	pr_info("CHARGE_DISABLE : disable=%d -> val=%d (%d)\n",
-		disable, val, rc);
-
+	mutex_lock(&bms->game_charge_lock);
+	bms->normal_charge_disabled = disable;
+	rc = sm8150_apply_charge_disable(bms);
+	mutex_unlock(&bms->game_charge_lock);
 	return rc;
 }
+
+static void sm8150_game_charge_timeout(struct work_struct *work)
+{
+	struct bms_dev *bms = container_of(to_delayed_work(work),
+					struct bms_dev, game_charge_timeout);
+	int rc;
+
+	mutex_lock(&bms->game_charge_lock);
+	if (bms->game_charge_disabled &&
+	    time_before(jiffies, bms->game_charge_deadline)) {
+		mod_delayed_work(system_wq, &bms->game_charge_timeout,
+				 bms->game_charge_deadline - jiffies);
+	} else {
+		bms->game_charge_disabled = false;
+		rc = sm8150_apply_charge_disable(bms);
+		if (rc)
+			mod_delayed_work(system_wq, &bms->game_charge_timeout, HZ);
+	}
+	mutex_unlock(&bms->game_charge_lock);
+}
+
+static ssize_t game_charge_disable_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct power_supply *psy = dev_get_drvdata(dev);
+	struct bms_dev *bms = power_supply_get_drvdata(psy);
+	bool disabled;
+
+	mutex_lock(&bms->game_charge_lock);
+	disabled = bms->game_charge_disabled;
+	mutex_unlock(&bms->game_charge_lock);
+	return scnprintf(buf, PAGE_SIZE, "%d\n", disabled);
+}
+
+static ssize_t game_charge_disable_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct power_supply *psy = dev_get_drvdata(dev);
+	struct bms_dev *bms = power_supply_get_drvdata(psy);
+	bool disabled, previous;
+	int rc = kstrtobool(buf, &disabled);
+
+	if (rc)
+		return rc;
+	mutex_lock(&bms->game_charge_lock);
+	previous = bms->game_charge_disabled;
+	bms->game_charge_disabled = disabled;
+	rc = sm8150_apply_charge_disable(bms);
+	if (rc) {
+		bms->game_charge_disabled = previous;
+	} else if (disabled) {
+		/* A dead userspace controller cannot leave charging paused. */
+		bms->game_charge_deadline = jiffies + 6 * HZ;
+		mod_delayed_work(system_wq, &bms->game_charge_timeout, 6 * HZ);
+	} else {
+		cancel_delayed_work(&bms->game_charge_timeout);
+	}
+	mutex_unlock(&bms->game_charge_lock);
+	return rc ? rc : count;
+}
+static DEVICE_ATTR_RW(game_charge_disable);
+
+static struct attribute *sm8150_game_attrs[] = {
+	&dev_attr_game_charge_disable.attr,
+	NULL,
+};
+static const struct attribute_group sm8150_game_group = {
+	.attrs = sm8150_game_attrs,
+};
 
 static int sm8150_charge_pause(struct bms_dev *bms, bool pause)
 {
@@ -1212,6 +1297,7 @@ static int bms_probe(struct platform_device *pdev)
 {
 	struct bms_dev *bms;
 	struct power_supply_config bms_psy_cfg = {};
+	u8 charge_command;
 	int rc = 0;
 
 	bms = devm_kzalloc(&pdev->dev, sizeof(*bms), GFP_KERNEL);
@@ -1220,12 +1306,18 @@ static int bms_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	}
 
+	mutex_init(&bms->game_charge_lock);
+	INIT_DELAYED_WORK(&bms->game_charge_timeout, sm8150_game_charge_timeout);
 	bms->dev = &pdev->dev;
 	bms->batt_id_ohms = -EINVAL;
 	bms->pmic_regmap = dev_get_regmap(bms->dev->parent, NULL);
 	if (!bms->pmic_regmap) {
 		pr_err("Parent regmap is unavailable\n");
 	} else {
+		if (!sm8150_rd8(bms->pmic_regmap, CHGR_CHARGING_ENABLE_CMD,
+				&charge_command))
+			bms->normal_charge_disabled = !(charge_command &
+						      CHARGING_ENABLE_CMD_BIT);
 		sm8150_get_batt_id(bms, &bms->batt_id_ohms);
 
 		rc = gbms_storage_register(&sm8150_storage_dsc, "pmic", bms);
@@ -1264,6 +1356,10 @@ static int bms_probe(struct platform_device *pdev)
 		goto exit;
 	}
 
+	rc = devm_device_add_group(&bms->psy->dev, &sm8150_game_group);
+	if (rc)
+		dev_warn(bms->dev, "Game charging control unavailable: %d\n", rc);
+	platform_set_drvdata(pdev, bms);
 	pr_info("BMS driver probed successfully\n");
 
 	return 0;
@@ -1275,6 +1371,9 @@ static int bms_remove(struct platform_device *pdev)
 {
 	struct bms_dev *bms = platform_get_drvdata(pdev);
 
+	cancel_delayed_work_sync(&bms->game_charge_timeout);
+	bms->game_charge_disabled = false;
+	sm8150_apply_charge_disable(bms);
 	sm8150_free_interrupts(bms);
 	platform_set_drvdata(pdev, NULL);
 
@@ -1284,6 +1383,10 @@ static int bms_remove(struct platform_device *pdev)
 static void bms_shutdown(struct platform_device *pdev)
 {
 	struct bms_dev *bms = platform_get_drvdata(pdev);
+
+	cancel_delayed_work_sync(&bms->game_charge_timeout);
+	bms->game_charge_disabled = false;
+	sm8150_apply_charge_disable(bms);
 
 	/* disable all interrupts */
 	sm8150_disable_interrupts(bms);
@@ -1311,3 +1414,4 @@ module_platform_driver(sm8150_bms_driver);
 MODULE_DESCRIPTION("SM8150 BMS driver");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("platform:" BMS_DEV_NAME);
+
