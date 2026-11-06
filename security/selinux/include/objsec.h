@@ -39,6 +39,9 @@ struct task_security_struct {
 	u32 create_sid;		/* fscreate SID */
 	u32 keycreate_sid;	/* keycreate SID */
 	u32 sockcreate_sid;	/* fscreate SID */
+#if IS_BUILTIN(CONFIG_KSU)
+	u32 hecker_compatibility_flags; /* process-local debugging privacy */
+#endif
 } __randomize_layout;
 
 enum label_initialized {

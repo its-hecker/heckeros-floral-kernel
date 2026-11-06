@@ -3267,8 +3267,65 @@ static int selinux_inode_setattr(struct dentry *dentry, struct iattr *iattr)
 	return dentry_has_perm(cred, dentry, av);
 }
 
+#if IS_BUILTIN(CONFIG_KSU)
+/* Private self-only handshake with bionic. It adds no capability or permission. */
+#define HECKER_APP_PRIVACY_PRCTL 0x484b4350
+#define HECKER_HIDE_DEBUGGING 4U
+
+static int selinux_hecker_task_prctl(int option, unsigned long flags,
+		unsigned long unused3, unsigned long unused4, unsigned long unused5)
+{
+	struct cred *new;
+
+	if (option != HECKER_APP_PRIVACY_PRCTL)
+		return -ENOSYS;
+	if (current_uid().val % 100000 < 10000 || unused3 || unused4 || unused5 ||
+	    flags & ~(unsigned long)HECKER_HIDE_DEBUGGING)
+		return -EINVAL;
+	new = prepare_creds();
+	if (!new)
+		return -ENOMEM;
+	selinux_cred(new)->hecker_compatibility_flags = flags;
+	return commit_creds(new);
+}
+
+static bool hecker_hide_debugging(void)
+{
+	return current_uid().val % 100000 >= 10000 &&
+		(selinux_cred(current_cred())->hecker_compatibility_flags & HECKER_HIDE_DEBUGGING);
+}
+
+static bool hecker_hide_adbd_path(const struct path *path)
+{
+	char buffer[96];
+	char *name;
+
+	if (!hecker_hide_debugging())
+		return false;
+	name = d_path(path, buffer, sizeof(buffer));
+	return !IS_ERR(name) && !strcmp(name, "/dev/socket/adbd");
+}
+
+/* sockaddr has already been copied/validated by the socket syscall. */
+static bool hecker_hide_debug_socket(const struct sockaddr *address, int addrlen)
+{
+	const struct sockaddr_un *un = (const struct sockaddr_un *)address;
+	static const char jdwp[] = "jdwp-control";
+	size_t base = offsetof(struct sockaddr_un, sun_path);
+
+	if (!hecker_hide_debugging() || addrlen < 0 || (size_t)addrlen < base || address->sa_family != AF_UNIX)
+		return false;
+	return (size_t)addrlen == base + sizeof(jdwp) && !un->sun_path[0] &&
+		!memcmp(un->sun_path + 1, jdwp, sizeof(jdwp) - 1);
+}
+#endif
+
 static int selinux_inode_getattr(const struct path *path)
 {
+#if IS_BUILTIN(CONFIG_KSU)
+	if (hecker_hide_adbd_path(path))
+		return -ENOENT;
+#endif
 	return path_has_perm(current_cred(), path, FILE__GETATTR);
 }
 
@@ -4783,6 +4840,11 @@ static int selinux_socket_connect(struct socket *sock, struct sockaddr *address,
 	struct sk_security_struct *sksec = sk->sk_security;
 	int err;
 
+#if IS_BUILTIN(CONFIG_KSU)
+	if (hecker_hide_debug_socket(address, addrlen))
+		return -ECONNREFUSED;
+#endif
+
 	err = sock_has_perm(sk, SOCKET__CONNECT);
 	if (err)
 		return err;
@@ -6170,6 +6232,10 @@ bad:
 	return error;
 }
 
+#if IS_BUILTIN(CONFIG_KSU)
+extern bool ksu_should_hide_selinux_context(const char *value, size_t size);
+#endif
+
 static int selinux_setprocattr(const char *name, void *value, size_t size)
 {
 	struct task_security_struct *tsec;
@@ -6205,6 +6271,15 @@ static int selinux_setprocattr(const char *name, void *value, size_t size)
 		error = -EINVAL;
 	if (error)
 		return error;
+
+#if IS_BUILTIN(CONFIG_KSU)
+	/* Keep SETCURRENT denial ordering for ordinary apps. An app_zygote that can
+	 * parse labels sees the same invalid-context result as selinuxfs probes.
+	 * This never grants a permission or changes the live policy/enforcing state.
+	 */
+	if (ksu_should_hide_selinux_context(value, size))
+		return -EINVAL;
+#endif
 
 	/* Obtain a SID for the context, if one was specified. */
 	if (size && str[0] && str[0] != '\n') {
@@ -6825,6 +6900,9 @@ static struct security_hook_list selinux_hooks[] __lsm_ro_after_init = {
 	LSM_HOOK_INIT(task_getpgid, selinux_task_getpgid),
 	LSM_HOOK_INIT(task_getsid, selinux_task_getsid),
 	LSM_HOOK_INIT(task_getsecid, selinux_task_getsecid),
+#if IS_BUILTIN(CONFIG_KSU)
+	LSM_HOOK_INIT(task_prctl, selinux_hecker_task_prctl),
+#endif
 	LSM_HOOK_INIT(task_setnice, selinux_task_setnice),
 	LSM_HOOK_INIT(task_setioprio, selinux_task_setioprio),
 	LSM_HOOK_INIT(task_getioprio, selinux_task_getioprio),
