@@ -15,6 +15,8 @@ CONFIG_IKCONFIG=y
 CONFIG_IKCONFIG_PROC=y
 CONFIG_LOG_BUF_SHIFT=20
 CONFIG_CGROUPS=y
+# Schedule opted-in unbound workqueues without unnecessary per-CPU wakes.
+CONFIG_WQ_POWER_EFFICIENT_DEFAULT=y
 CONFIG_BLK_CGROUP=y
 CONFIG_CGROUP_SCHED=y
 # CONFIG_FAIR_GROUP_SCHED is not set
@@ -234,6 +236,17 @@ CONFIG_NET_SCH_MULTIQ=y
 CONFIG_NET_SCH_TBF=y
 CONFIG_NET_SCH_NETEM=y
 CONFIG_NET_SCH_FQ_CODEL=y
+# BBR pacing test: retain fq_codel support, use fq for pacing-capable qdiscs.
+CONFIG_NET_SCH_FQ=y
+CONFIG_NET_SCH_DEFAULT=y
+CONFIG_DEFAULT_FQ=y
+CONFIG_DEFAULT_NET_SCH="fq"
+# Keep Cubic selectable as an explicit fallback for cellular/Wi-Fi A/B tests.
+CONFIG_TCP_CONG_ADVANCED=y
+CONFIG_TCP_CONG_CUBIC=y
+CONFIG_TCP_CONG_BBR=y
+CONFIG_DEFAULT_BBR=y
+CONFIG_DEFAULT_TCP_CONG="bbr"
 CONFIG_NET_SCH_PIE=y
 CONFIG_NET_SCH_INGRESS=y
 CONFIG_NET_CLS_FW=y
@@ -720,8 +733,10 @@ CONFIG_SCHED_STACK_END_CHECK=y
 CONFIG_IPC_LOGGING=y
 CONFIG_BUG_ON_DATA_CORRUPTION=y
 CONFIG_CC_WERROR=y
-CONFIG_KGDB=y
-CONFIG_KGDB_KDB=y
+# The interactive KGDB debugger is unused in normal ROM builds.
+# Keep SCHEDSTATS, dynamic debug, panic logs and tracing for freeze diagnosis.
+# CONFIG_KGDB is not set
+# CONFIG_KGDB_KDB is not set
 CONFIG_UBSAN=y
 CONFIG_UBSAN_TRAP=y
 # CONFIG_UBSAN_MISC is not set
