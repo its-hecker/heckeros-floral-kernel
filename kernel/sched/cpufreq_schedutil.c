@@ -226,6 +226,8 @@ static void sugov_update_commit(struct sugov_policy *sg_policy, u64 time,
 {
 	struct cpufreq_policy *policy = sg_policy->policy;
 	unsigned int cpu;
+	unsigned int previous_next_freq = sg_policy->next_freq;
+	u64 previous_update_time = sg_policy->last_freq_update_time;
 
 	if (sg_policy->next_freq == next_freq)
 		return;
@@ -242,8 +244,15 @@ static void sugov_update_commit(struct sugov_policy *sg_policy, u64 time,
 	if (policy->fast_switch_enabled) {
 		sugov_track_cycles(sg_policy, sg_policy->policy->cur, time);
 		next_freq = cpufreq_driver_fast_switch(policy, next_freq);
-		if (!next_freq)
+		if (!next_freq) {
+			/* A rejected DVFS request must not consume the next
+			 * scheduling window or cache a clock that was never set.
+			 */
+			sg_policy->next_freq = previous_next_freq;
+			sg_policy->last_freq_update_time = previous_update_time;
+			sg_policy->cached_raw_freq = 0;
 			return;
+		}
 
 		policy->cur = next_freq;
 		for_each_cpu(cpu, policy->cpus) {
